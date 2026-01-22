@@ -1,0 +1,717 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>GhostSignal Demo - Visible Byte Bar + Stego-Scanner</title>
+  <style>
+    :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    body { margin: 16px; background: #0b0d10; color: #e8eef6; }
+    h1 { font-size: 18px; margin: 0 0 12px 0; }
+    .row { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+    .panel { background: #121723; border: 1px solid #222b3a; border-radius: 10px; padding: 12px; }
+    .panel h2 { margin: 0 0 8px 0; font-size: 14px; color: #c9d6ea; }
+    label { display: block; font-size: 12px; color: #a9b8cf; margin: 8px 0 6px; }
+    input[type="text"], textarea {
+      width: 100%; box-sizing: border-box; padding: 10px;
+      border-radius: 8px; border: 1px solid #2a3548;
+      background: #0f1420; color: #e8eef6; resize: vertical;
+    }
+    input[type="file"] { width: 100%; }
+    button {
+      padding: 10px 12px; border-radius: 8px; border: 1px solid #2a3548;
+      background: #182034; color: #e8eef6; cursor: pointer;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btns { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+    .hint { font-size: 12px; color: #9db0cc; line-height: 1.35; }
+    canvas { border-radius: 10px; border: 1px solid #222b3a; background: #080a0f; }
+    #playerCanvas { display: block; max-width: 100%; height: auto; }
+    #scannerCanvas { display: block; width: 100%; height: auto; }
+    pre {
+      white-space: pre-wrap; word-break: break-word; margin: 10px 0 0;
+      padding: 10px; border-radius: 10px; border: 1px solid #222b3a;
+      background: #0f1420; color: #d7e6ff; font-size: 12px; line-height: 1.4;
+      max-height: 260px; overflow: auto;
+    }
+    a { color: #7cc4ff; }
+    .small { font-size: 11px; color: #93a7c6; }
+  </style>
+</head>
+<body>
+  <h1>Video Stego Demo — Visible Bottom Byte Bar (2×4 cells per byte) + Stego-Scanner</h1>
+
+  <div class="row">
+    <div class="panel" style="flex: 2; min-width: 420px;">
+      <h2>Player Canvas</h2>
+      <canvas id="playerCanvas" width="960" height="540"></canvas>
+      <div class="small" style="margin-top:8px;">
+        Bottom band: 8×8 px cells, 4 rows (32px). Each byte is a 2×4 block. Bit 1 = white, bit 0 = black.
+      </div>
+    </div>
+
+    <div class="panel" style="flex: 1; min-width: 360px;">
+      <h2>Controls</h2>
+
+      <label>Video file</label>
+      <input id="fileInput" type="file" accept="video/*" />
+
+      <label>Payload text</label>
+      <input id="payloadInput" type="text" placeholder="Type text to embed..." />
+
+      <div class="btns">
+        <button id="setBtn" disabled>SetData</button>
+        <button id="getBtn" disabled>GetData</button>
+        <button id="stopBtn" disabled>Stop</button>
+      </div>
+
+      <div class="hint" style="margin-top:10px;">
+        <div><b>SetData</b>: draws video + visible bar on every frame and records WebM.</div>
+        <div><b>GetData</b>: scans bar, finds header (GSIG), writes decoded text into <i>Decoded output</i>.</div>
+      </div>
+
+      <div style="margin-top:10px;" id="downloadArea" class="hint"></div>
+
+      <label>Decoded output</label>
+      <textarea id="decodedOutput" rows="4" placeholder="Decoded text will appear here..." readonly></textarea>
+
+      <pre id="log"></pre>
+    </div>
+  </div>
+
+  <div class="row" style="margin-top:16px;">
+    <div class="panel" style="flex: 1; min-width: 420px;">
+      <h2>Stego-Scanner</h2>
+      <canvas id="scannerCanvas" width="960" height="200"></canvas>
+      <div class="small" style="margin-top:8px;">
+        Visualizes extracted bytes from the bottom band.
+      </div>
+    </div>
+  </div>
+
+  <video id="video" playsinline muted style="display:none"></video>
+
+  <script>
+    // =========================
+    // Config
+    // =========================
+    const CELL_SIZE = 8;
+    const BAND_ROWS = 4;
+    const BYTE_BLOCK_W = 2;
+    const BYTE_BLOCK_H = 4;
+    const TARGET_FPS = 30;
+
+    const START_FRAME_SKIP = 0;
+    const FRAME_STRIDE = 1;
+
+    const MAGIC = "GSIG";
+    const VERSION = 1;
+
+    const BAND_BG = "rgb(24,30,40)";
+    const COLOR_ONE = "rgb(255,255,255)";
+    const COLOR_ZERO = "rgb(0,0,0)";
+
+    const REPEAT_MODE = true;
+    const LUMA_THRESHOLD = 0.35;
+
+    // =========================
+    // DOM
+    // =========================
+    const fileInput = document.getElementById("fileInput");
+    const payloadInput = document.getElementById("payloadInput");
+    const decodedOutput = document.getElementById("decodedOutput");
+    const setBtn = document.getElementById("setBtn");
+    const getBtn = document.getElementById("getBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const logEl = document.getElementById("log");
+    const downloadArea = document.getElementById("downloadArea");
+
+    const playerCanvas = document.getElementById("playerCanvas");
+    const pctx = playerCanvas.getContext("2d", { willReadFrequently: true });
+
+    const scannerCanvas = document.getElementById("scannerCanvas");
+    const sctx = scannerCanvas.getContext("2d", { willReadFrequently: true });
+
+    const video = document.getElementById("video");
+
+    // =========================
+    // State
+    // =========================
+    let mode = "idle"; // idle | preview | encoding | decoding
+    let stopRequested = false;
+    let frameIndex = 0;
+
+    let recorder = null;
+    let recordedChunks = [];
+    let recordingStopPromise = null;
+
+    const scannerState = {
+      cols: 0,
+      bytesPerFrame: 0,
+      lastFrameBytes: new Uint8Array(0),
+      byteCursor: 0
+    };
+
+    // =========================
+    // Logging
+    // =========================
+    function log(msg) {
+      const now = new Date().toISOString().replace("T", " ").replace("Z", "");
+      logEl.textContent += `[${now}] ${msg}\n`;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+    function clearLog() { logEl.textContent = ""; }
+
+    // =========================
+    // Helpers
+    // =========================
+    function packHeader(payloadLen) {
+      const magicBytes = new TextEncoder().encode(MAGIC);
+      const header = new Uint8Array(9);
+      header.set(magicBytes, 0);
+      header[4] = VERSION & 0xff;
+      header[5] = (payloadLen >>> 24) & 0xff;
+      header[6] = (payloadLen >>> 16) & 0xff;
+      header[7] = (payloadLen >>> 8) & 0xff;
+      header[8] = (payloadLen >>> 0) & 0xff;
+      return header;
+    }
+
+    function parseHeader(headerBytes) {
+      if (headerBytes.length < 9) return null;
+      const magic = new TextDecoder().decode(headerBytes.slice(0, 4));
+      const version = headerBytes[4];
+      const len = (
+        (headerBytes[5] << 24) |
+        (headerBytes[6] << 16) |
+        (headerBytes[7] << 8) |
+        (headerBytes[8])
+      ) >>> 0;
+      return { magic, version, len };
+    }
+
+    function concatBytes(a, b) {
+      const out = new Uint8Array(a.length + b.length);
+      out.set(a, 0);
+      out.set(b, a.length);
+      return out;
+    }
+
+    function findHeaderInBytes(bytes) {
+      const magicBytes = new TextEncoder().encode(MAGIC);
+      for (let i = 0; i <= bytes.length - 9; i++) {
+        let ok = true;
+        for (let k = 0; k < 4; k++) {
+          if (bytes[i + k] !== magicBytes[k]) { ok = false; break; }
+        }
+        if (!ok) continue;
+        if (bytes[i + 4] !== VERSION) continue;
+        const hdr = parseHeader(bytes.slice(i, i + 9));
+        if (hdr && hdr.magic === MAGIC && hdr.version === VERSION) return { byteOffset: i, header: hdr };
+      }
+      return null;
+    }
+
+    function hasRVFC(v) {
+      return typeof v.requestVideoFrameCallback === "function";
+    }
+
+    function scheduleNextFrame(cb) {
+      if (hasRVFC(video)) video.requestVideoFrameCallback(() => cb());
+      else setTimeout(cb, Math.floor(1000 / TARGET_FPS));
+    }
+
+    function bandCols(canvasWidth) {
+      return Math.floor(canvasWidth / CELL_SIZE);
+    }
+
+    function bytesPerFrame(canvasWidth) {
+      const cols = bandCols(canvasWidth);
+      return Math.floor(cols / BYTE_BLOCK_W);
+    }
+
+    // =========================
+    // Drawing: byte band
+    // =========================
+    function drawBandBackground() {
+      const w = playerCanvas.width;
+      const h = playerCanvas.height;
+      const bandH = BAND_ROWS * CELL_SIZE;
+      pctx.fillStyle = BAND_BG;
+      pctx.fillRect(0, h - bandH, w, bandH);
+    }
+
+    function drawByteBlock(byteValue, blockIndex) {
+      const h = playerCanvas.height;
+      const y0 = h - (BAND_ROWS * CELL_SIZE);
+      const xCellBase = blockIndex * BYTE_BLOCK_W;
+
+      for (let row = 0; row < BYTE_BLOCK_H; row++) {
+        for (let col = 0; col < BYTE_BLOCK_W; col++) {
+          const bitIndex = 7 - (row * BYTE_BLOCK_W + col);
+          const bit = (byteValue >> bitIndex) & 1;
+          pctx.fillStyle = bit ? COLOR_ONE : COLOR_ZERO;
+          const x = (xCellBase + col) * CELL_SIZE;
+          const y = y0 + row * CELL_SIZE;
+          pctx.fillRect(x, y, CELL_SIZE, CELL_SIZE);
+        }
+      }
+    }
+
+    function overlayByteBand(messageBytes, cursor) {
+      const bpf = bytesPerFrame(playerCanvas.width);
+      drawBandBackground();
+
+      for (let i = 0; i < bpf; i++) {
+        let v = 0;
+        if (messageBytes.length > 0) {
+          if (REPEAT_MODE) v = messageBytes[(cursor + i) % messageBytes.length];
+          else {
+            const idx = cursor + i;
+            v = (idx < messageBytes.length) ? messageBytes[idx] : 0;
+          }
+        }
+        drawByteBlock(v, i);
+      }
+
+      return bpf;
+    }
+
+    // =========================
+    // Decoding: extract bytes
+    // =========================
+    function lumaFromRGB(r, g, b) {
+      return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+    }
+
+    function measureCellBit(img, cellX, cellY) {
+      const cx = Math.min(img.width - 1, cellX * CELL_SIZE + (CELL_SIZE >> 1));
+      const cy = Math.min(img.height - 1, cellY * CELL_SIZE + (CELL_SIZE >> 1));
+      const idx = (cy * img.width + cx) * 4;
+      const y = lumaFromRGB(img.data[idx], img.data[idx + 1], img.data[idx + 2]);
+      return (y > LUMA_THRESHOLD) ? 1 : 0;
+    }
+
+    function extractByteFromBlock(imgBand, blockIndex) {
+      const xCellBase = blockIndex * BYTE_BLOCK_W;
+      let v = 0;
+
+      for (let row = 0; row < BYTE_BLOCK_H; row++) {
+        for (let col = 0; col < BYTE_BLOCK_W; col++) {
+          const bitIndex = 7 - (row * BYTE_BLOCK_W + col);
+          const bit = measureCellBit(imgBand, xCellBase + col, row);
+          v |= (bit << bitIndex);
+        }
+      }
+
+      return v;
+    }
+
+    function extractBytesFromBand() {
+      const w = playerCanvas.width;
+      const h = playerCanvas.height;
+      const bandH = BAND_ROWS * CELL_SIZE;
+      const y0 = h - bandH;
+
+      const bpf = bytesPerFrame(w);
+      const img = pctx.getImageData(0, y0, w, bandH);
+
+      const out = new Uint8Array(bpf);
+      for (let i = 0; i < bpf; i++) out[i] = extractByteFromBlock(img, i);
+
+      scannerState.cols = bandCols(w);
+      scannerState.bytesPerFrame = bpf;
+      scannerState.lastFrameBytes = out;
+
+      return out;
+    }
+
+    // =========================
+    // Scanner visualization
+    // =========================
+    function drawScanner() {
+      const cw = scannerCanvas.width;
+      const ch = scannerCanvas.height;
+
+      sctx.clearRect(0, 0, cw, ch);
+      sctx.fillStyle = "rgb(10,14,22)";
+      sctx.fillRect(0, 0, cw, ch);
+
+      const cols = scannerState.cols || bandCols(playerCanvas.width);
+      const rows = BAND_ROWS;
+      const gridW = cols * CELL_SIZE;
+      const gridH = rows * CELL_SIZE;
+
+      const scale = Math.min(cw / gridW, (ch * 0.55) / gridH);
+      const gx = Math.floor((cw - gridW * scale) / 2);
+      const gy = 10;
+
+      sctx.save();
+      sctx.translate(gx, gy);
+      sctx.scale(scale, scale);
+
+      sctx.fillStyle = BAND_BG;
+      sctx.fillRect(0, 0, gridW, gridH);
+
+      const bpf = scannerState.bytesPerFrame || bytesPerFrame(playerCanvas.width);
+      const bytes = scannerState.lastFrameBytes || new Uint8Array(0);
+
+      for (let bi = 0; bi < bpf; bi++) {
+        const v = bytes[bi] ?? 0;
+        const xCellBase = bi * BYTE_BLOCK_W;
+        for (let row = 0; row < BYTE_BLOCK_H; row++) {
+          for (let col = 0; col < BYTE_BLOCK_W; col++) {
+            const bitIndex = 7 - (row * BYTE_BLOCK_W + col);
+            const bit = (v >> bitIndex) & 1;
+            sctx.fillStyle = bit ? "rgb(255,255,255)" : "rgb(0,0,0)";
+            sctx.fillRect((xCellBase + col) * CELL_SIZE, row * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+          }
+        }
+      }
+
+      const cur = scannerState.byteCursor % Math.max(1, bpf);
+      sctx.strokeStyle = "rgba(124,196,255,0.95)";
+      sctx.lineWidth = 2 / scale;
+      sctx.strokeRect(cur * BYTE_BLOCK_W * CELL_SIZE, 0, BYTE_BLOCK_W * CELL_SIZE, BYTE_BLOCK_H * CELL_SIZE);
+
+      sctx.restore();
+
+      sctx.fillStyle = "rgba(232,238,246,0.95)";
+      sctx.font = "12px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+      const yBase = Math.floor(ch * 0.72);
+      sctx.fillText("Stego-Scanner:", 10, yBase);
+      sctx.fillStyle = "rgba(157,176,204,0.95)";
+      sctx.fillText(`Bytes/frame: ${scannerState.bytesPerFrame || 0} | Threshold: ${LUMA_THRESHOLD}`, 10, yBase + 18);
+    }
+
+    // =========================
+    // UI state
+    // =========================
+    function setButtons(isBusy) {
+      setBtn.disabled = isBusy || !video.src;
+      getBtn.disabled = isBusy || !video.src;
+      stopBtn.disabled = !isBusy;
+    }
+
+    function stopToIdle() {
+      stopRequested = true;
+      mode = "idle";
+      setButtons(false);
+      try { video.pause(); } catch (_) {}
+    }
+
+    // =========================
+    // Preview
+    // =========================
+    function startPreviewLoop() {
+      mode = "preview";
+      stopRequested = false;
+      frameIndex = 0;
+
+      const tick = () => {
+        if (stopRequested || mode !== "preview") return;
+
+        if (video.readyState >= 2) {
+          pctx.drawImage(video, 0, 0, playerCanvas.width, playerCanvas.height);
+        }
+        drawScanner();
+        scheduleNextFrame(tick);
+      };
+
+      scheduleNextFrame(tick);
+    }
+
+    // =========================
+    // Encoding (SetData)
+    // =========================
+    async function runEncoding() {
+      clearLog();
+      decodedOutput.value = "";
+      downloadArea.innerHTML = "";
+
+      mode = "encoding";
+      stopRequested = false;
+      setButtons(true);
+
+      const payloadText = payloadInput.value ?? "";
+      const payloadBytes = new TextEncoder().encode(payloadText);
+      const messageBytes = concatBytes(packHeader(payloadBytes.length), payloadBytes);
+
+      log("Encoding started...");
+      log(`Message bytes: ${messageBytes.length}`);
+      log(`Bytes/frame: ${bytesPerFrame(playerCanvas.width)} | Repeat: ${REPEAT_MODE}`);
+
+      // Setup MediaRecorder
+      recordedChunks = [];
+      const stream = playerCanvas.captureStream(TARGET_FPS);
+
+      const mimeCandidates = [
+        "video/webm;codecs=vp8", // prefer vp8 for compatibility
+        "video/webm;codecs=vp9",
+        "video/webm"
+      ];
+      let mimeType = "";
+      for (const mt of mimeCandidates) {
+        if (MediaRecorder.isTypeSupported(mt)) { mimeType = mt; break; }
+      }
+      if (!mimeType) {
+        log("ERROR: MediaRecorder WebM is not supported in this browser.");
+        stopToIdle();
+        return;
+      }
+
+      recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 4_000_000 });
+
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) recordedChunks.push(e.data);
+      };
+
+      recordingStopPromise = new Promise((resolve) => {
+        recorder.onstop = resolve;
+      });
+
+      recorder.onerror = (e) => {
+        log(`Recorder error: ${e?.error?.message || "unknown"}`);
+      };
+
+      recorder.start(250);
+      log(`Recorder started: ${mimeType}`);
+
+      // Finalize hook (ended event is the reliable trigger)
+      const finalizeEncoding = async (reason) => {
+        if (mode !== "encoding") return;
+        mode = "finalizing";
+        stopRequested = true;
+
+        log(`Finalizing encoding (${reason})...`);
+        try { video.pause(); } catch (_) {}
+
+        try {
+          if (recorder && recorder.state !== "inactive") recorder.stop();
+        } catch (e) {
+          log(`Recorder stop exception: ${String(e)}`);
+        }
+
+        try {
+          await recordingStopPromise;
+        } catch (_) {}
+
+        const blob = new Blob(recordedChunks, { type: mimeType });
+        const url = URL.createObjectURL(blob);
+
+        downloadArea.innerHTML = `
+          <div><b>Encoded video ready.</b></div>
+          <div><a href="${url}" download="encoded_stego.webm">Download encoded video (WebM)</a></div>
+          <div class="small">Reload the encoded file to verify the visible bar is inside the video.</div>
+        `;
+
+        log(`Encoding finished. Output size: ${(blob.size / (1024 * 1024)).toFixed(2)} MB`);
+
+        // Return to idle and preview
+        mode = "idle";
+        setButtons(false);
+
+        try { video.currentTime = 0; await video.play(); } catch (_) {}
+        startPreviewLoop();
+      };
+
+      // Ensure previous handlers don't pile up
+      video.onended = null;
+      video.onended = () => finalizeEncoding("video ended");
+
+      // Start playback
+      try {
+        video.currentTime = 0;
+        await video.play();
+      } catch (e) {
+        log(`ERROR: video.play() failed: ${String(e)}`);
+        await finalizeEncoding("play failed");
+        return;
+      }
+
+      frameIndex = 0;
+      let byteCursor = 0;
+
+      const tick = () => {
+        if (stopRequested || mode !== "encoding") return;
+
+        if (video.readyState >= 2) {
+          pctx.drawImage(video, 0, 0, playerCanvas.width, playerCanvas.height);
+
+          const shouldUse = (frameIndex >= START_FRAME_SKIP) && ((frameIndex - START_FRAME_SKIP) % FRAME_STRIDE === 0);
+          if (shouldUse) {
+            const adv = overlayByteBand(messageBytes, byteCursor);
+            byteCursor += adv;
+            if (REPEAT_MODE && messageBytes.length > 0) byteCursor %= messageBytes.length;
+          }
+
+          scannerState.byteCursor = (scannerState.byteCursor + 1) % Math.max(1, bytesPerFrame(playerCanvas.width));
+          drawScanner();
+        }
+
+        frameIndex++;
+        scheduleNextFrame(tick);
+      };
+
+      scheduleNextFrame(tick);
+
+      // Stop button should also finalize
+      stopBtn.onclick = () => finalizeEncoding("manual stop");
+    }
+
+    // =========================
+    // Decoding (GetData)
+    // =========================
+    async function runDecoding() {
+      clearLog();
+      decodedOutput.value = "";
+      downloadArea.innerHTML = "";
+
+      mode = "decoding";
+      stopRequested = false;
+      setButtons(true);
+
+      log("Decoding started...");
+
+      try {
+        video.currentTime = 0;
+        await video.play();
+      } catch (e) {
+        log(`ERROR: video.play() failed: ${String(e)}`);
+        stopToIdle();
+        return;
+      }
+
+      frameIndex = 0;
+      let collected = new Uint8Array(0);
+      let sync = null;
+      let needTotalBytes = null;
+
+      const tick = () => {
+        if (stopRequested || mode !== "decoding") return;
+
+        if (video.readyState >= 2) {
+          pctx.drawImage(video, 0, 0, playerCanvas.width, playerCanvas.height);
+
+          const shouldUse = (frameIndex >= START_FRAME_SKIP) && ((frameIndex - START_FRAME_SKIP) % FRAME_STRIDE === 0);
+          if (shouldUse) {
+            const frameBytes = extractBytesFromBand();
+            collected = concatBytes(collected, frameBytes);
+
+            scannerState.byteCursor = (scannerState.byteCursor + 1) % Math.max(1, scannerState.bytesPerFrame || 1);
+            drawScanner();
+
+            if (!sync && collected.length >= 12) {
+              const found = findHeaderInBytes(collected);
+              if (found) {
+                sync = found;
+                needTotalBytes = 9 + sync.header.len;
+                log(`SYNC FOUND at byte=${sync.byteOffset}. Payload len=${sync.header.len}.`);
+              }
+            }
+
+            if (sync && needTotalBytes !== null) {
+              const availableFromSync = collected.length - sync.byteOffset;
+              if (availableFromSync >= needTotalBytes) {
+                const msg = collected.slice(sync.byteOffset, sync.byteOffset + needTotalBytes);
+                const hdr = parseHeader(msg.slice(0, 9));
+                if (hdr && hdr.magic === MAGIC && hdr.version === VERSION) {
+                  const payload = msg.slice(9, 9 + hdr.len);
+                  const text = new TextDecoder().decode(payload);
+
+                  decodedOutput.value = text;
+                  log("Decoded output written to the Decoded output field.");
+                  log(text);
+
+                  stopRequested = true;
+                  stopToIdle();
+                  return;
+                } else {
+                  log("Header mismatch after sync; continuing scan...");
+                  sync = null;
+                  needTotalBytes = null;
+                }
+              }
+            }
+          }
+        }
+
+        frameIndex++;
+        if (video.ended) {
+          log("Video ended before decode completed.");
+          stopRequested = true;
+          stopToIdle();
+          return;
+        }
+
+        scheduleNextFrame(tick);
+      };
+
+      scheduleNextFrame(tick);
+
+      stopBtn.onclick = () => {
+        log("Manual stop.");
+        stopToIdle();
+      };
+    }
+
+    // =========================
+    // File load
+    // =========================
+    fileInput.addEventListener("change", async () => {
+      const file = fileInput.files?.[0];
+      if (!file) return;
+
+      clearLog();
+      decodedOutput.value = "";
+      downloadArea.innerHTML = "";
+
+      stopToIdle();
+
+      const url = URL.createObjectURL(file);
+      video.src = url;
+      video.muted = true;
+      video.playsInline = true;
+
+      log(`Loaded file: ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`);
+
+      await new Promise((resolve) => {
+        video.onloadedmetadata = () => resolve();
+      });
+
+      playerCanvas.width = video.videoWidth || playerCanvas.width;
+      playerCanvas.height = video.videoHeight || playerCanvas.height;
+      scannerCanvas.width = playerCanvas.width;
+
+      log(`Video: ${video.videoWidth}x${video.videoHeight}, duration ~${video.duration.toFixed(2)}s`);
+      log(`Bytes/frame: ${bytesPerFrame(playerCanvas.width)} | Repeat: ${REPEAT_MODE}`);
+
+      setButtons(false);
+
+      try { video.currentTime = 0; await video.play(); } catch (_) {}
+      startPreviewLoop();
+    });
+
+    // =========================
+    // Buttons
+    // =========================
+    setBtn.addEventListener("click", async () => {
+      if (!video.src) return;
+      stopRequested = true;
+      try { video.pause(); } catch (_) {}
+      await runEncoding();
+    });
+
+    getBtn.addEventListener("click", async () => {
+      if (!video.src) return;
+      stopRequested = true;
+      try { video.pause(); } catch (_) {}
+      await runDecoding();
+    });
+
+    // Initialize
+    setButtons(false);
+    drawScanner();
+  </script>
+</body>
+</html>
