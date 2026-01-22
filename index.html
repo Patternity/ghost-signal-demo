@@ -3,11 +3,12 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>GhostSignal Demo - Visible Byte Bar + Stego-Scanner</title>
+  <title>GhostSignal Demo — VBB Transport Prototype</title>
   <style>
     :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
     body { margin: 16px; background: #0b0d10; color: #e8eef6; }
-    h1 { font-size: 18px; margin: 0 0 12px 0; }
+    h1 { font-size: 18px; margin: 0 0 6px 0; }
+    .subhead { font-size: 12px; color: #9db0cc; margin: 0 0 12px 0; line-height: 1.35; }
     .row { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
     .panel { background: #121723; border: 1px solid #222b3a; border-radius: 10px; padding: 12px; }
     .panel h2 { margin: 0 0 8px 0; font-size: 14px; color: #c9d6ea; }
@@ -39,35 +40,39 @@
   </style>
 </head>
 <body>
-  <h1>Video Stego Demo — Visible Bottom Byte Bar (2×4 cells per byte) + Stego-Scanner</h1>
+  <h1>GhostSignal Demo — VBB Transport Prototype</h1>
+  <p class="subhead">
+    This demo validates the <b>video transport</b> used by GhostSignal (a deterministic bottom-band grid channel).
+    It embeds and extracts a GSIG-framed payload in-browser. Higher-level protocol layers (META/layouts) are specified separately.
+  </p>
 
   <div class="row">
     <div class="panel" style="flex: 2; min-width: 420px;">
-      <h2>Player Canvas</h2>
+      <h2>Video Frame</h2>
       <canvas id="playerCanvas" width="960" height="540"></canvas>
       <div class="small" style="margin-top:8px;">
-        Bottom band: 8×8 px cells, 4 rows (32px). Each byte is a 2×4 block. Bit 1 = white, bit 0 = black.
+        VBB profile (demo): bottom band, 8×8 px cells, 4 rows (32px). Each byte is a 2×4 cell block (MSB→LSB). 1 = white, 0 = black.
       </div>
     </div>
 
     <div class="panel" style="flex: 1; min-width: 360px;">
       <h2>Controls</h2>
 
-      <label>Video file</label>
+      <label>Input video</label>
       <input id="fileInput" type="file" accept="video/*" />
 
-      <label>Payload text</label>
-      <input id="payloadInput" type="text" placeholder="Type text to embed..." />
+      <label>Payload (UTF-8 text)</label>
+      <input id="payloadInput" type="text" placeholder="Enter text to embed into the video..." />
 
       <div class="btns">
-        <button id="setBtn" disabled>SetData</button>
-        <button id="getBtn" disabled>GetData</button>
+        <button id="setBtn" disabled>Embed</button>
+        <button id="getBtn" disabled>Extract</button>
         <button id="stopBtn" disabled>Stop</button>
       </div>
 
       <div class="hint" style="margin-top:10px;">
-        <div><b>SetData</b>: draws video + visible bar on every frame and records WebM.</div>
-        <div><b>GetData</b>: scans bar, finds header (GSIG), writes decoded text into <i>Decoded output</i>.</div>
+        <div><b>Embed</b>: draws video + VBB band per frame and records WebM.</div>
+        <div><b>Extract</b>: scans the VBB band, locates the <b>GSIG</b> header, and writes the decoded text into <i>Decoded output</i>.</div>
       </div>
 
       <div style="margin-top:10px;" id="downloadArea" class="hint"></div>
@@ -81,10 +86,10 @@
 
   <div class="row" style="margin-top:16px;">
     <div class="panel" style="flex: 1; min-width: 420px;">
-      <h2>Stego-Scanner</h2>
+      <h2>Stego Scanner</h2>
       <canvas id="scannerCanvas" width="960" height="200"></canvas>
       <div class="small" style="margin-top:8px;">
-        Visualizes extracted bytes from the bottom band.
+        Visualizes extracted bytes from the bottom band in real time.
       </div>
     </div>
   </div>
@@ -379,7 +384,7 @@
       sctx.fillStyle = "rgba(232,238,246,0.95)";
       sctx.font = "12px system-ui, -apple-system, Segoe UI, Roboto, Arial";
       const yBase = Math.floor(ch * 0.72);
-      sctx.fillText("Stego-Scanner:", 10, yBase);
+      sctx.fillText("Stego Scanner:", 10, yBase);
       sctx.fillStyle = "rgba(157,176,204,0.95)";
       sctx.fillText(`Bytes/frame: ${scannerState.bytesPerFrame || 0} | Threshold: ${LUMA_THRESHOLD}`, 10, yBase + 18);
     }
@@ -502,7 +507,7 @@
         downloadArea.innerHTML = `
           <div><b>Encoded video ready.</b></div>
           <div><a href="${url}" download="encoded_stego.webm">Download encoded video (WebM)</a></div>
-          <div class="small">Reload the encoded file to verify the visible bar is inside the video.</div>
+          <div class="small">Reload the encoded file to verify the VBB band is embedded in the video.</div>
         `;
 
         log(`Encoding finished. Output size: ${(blob.size / (1024 * 1024)).toFixed(2)} MB`);
@@ -712,6 +717,10 @@
     // Initialize
     setButtons(false);
     drawScanner();
+
+    // UI text updates (labels only; do not affect logic)
+    setBtn.textContent = "Embed";
+    getBtn.textContent = "Extract";
   </script>
 </body>
 </html>
